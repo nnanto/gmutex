@@ -70,7 +70,7 @@ func NewWithStrategy(maxGroupSize int, strategy Strategy) *GM {
 }
 
 // Lock locks the group.  This is similar to Reader lock in sync.RWMutex i.e, it allows
-// multiple Locks to same group. However it blocks, if a lock is on different group.
+// multiple Locks to same group. However it blocks, if a lock is from a different group.
 func (gm *GM) Lock(group int32) {
 	gm.validateGroup(group)
 	if c := atomic.AddInt32(&gm.counts[group], 1); c > 0 {
@@ -134,7 +134,7 @@ func (gm *GM) broker(request int32, existingGroup int32) int32 {
 			//                                                                                #7    CAS(1,0)
 			//
 			//        #8 CAS(1,-1)
-			//        ! WE ARE HERE: no one has lock now									  #9 grabLock(0)
+			//        ! WE ARE HERE: no one has lock now					  #9 grabLock(0)
 			//        leaveLock() should happen after #9
 
 			// So in above case we simulate a lock/unlock.
@@ -185,7 +185,7 @@ func (gm *GM) grabLock(group int32) {
 // validate group input
 func (gm *GM) validateGroup(group int32) {
 	if group <= empty || group >= int32(len(gm.counts)) {
-		panic("Lock group should be greater than 0 and less than the size defined")
+		panic("Lock group should be greater than 0 and less than or equal to the size defined")
 	}
 }
 
