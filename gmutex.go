@@ -1,6 +1,7 @@
 package gmutex
 
 import (
+	"fmt"
 	"sync/atomic"
 	_ "unsafe"
 )
@@ -75,9 +76,10 @@ func (gm *GM) Lock(group int32) {
 	gm.validateGroup(group)
 	if c := atomic.AddInt32(&gm.counts[group], 1); c > 0 {
 		// attempt to fetch brokerState
-		gm.broker(group, empty)
+		gm.broker(group, empty, 1)
 		acquire(&gm.semaphores[group])
 	}
+	//fmt.Printf("Obtained lock on :%v\n", group)
 }
 
 // Unlock unlocks the group. The last Unlock from the group waits for any unfinished tasks
@@ -85,79 +87,37 @@ func (gm *GM) Lock(group int32) {
 func (gm *GM) Unlock(group int32) {
 	gm.validateGroup(group)
 	c := atomic.AddInt32(&gm.counts[group], -1)
-	if c >= 0 && atomic.AddInt32(&gm.pending, -1) == 0 {
-		release(&gm.brokerWaitSem)
-	} else if c == -maxCount {
-
-		x := gm.broker(prepareUnlock, group)
-		if x == allDone {
-			// wake up any sleeping tasks
-			possiblyPendingGroup := gm.strategy()
-			if possiblyPendingGroup > 0 {
-				// T1                          T2
-				//
-				// #1 Lock(1)
-				// #2 Unlock(1)                #3 Lock(2)
-				//     #4 pg = strategy
-				//                             #5 Unlock(2)
-				//     #6 if pg > 0:
-				//     ! WE ARE HERE:
-				//     if we just call broker(pg,0)
-				//     then we will stop indefinitely as there's no one
-				//	   to unlock
-				//
-				// So we simulate a new entry, hence if the possiblyPendingGroup has already finished, this will
-				// be a wasteful op, otherwise it'll unlock the entries waiting in possiblyPendingGroup
-				// by obtaining lock (thus switching gm.brokerState from EMPTY to possiblyPendingGroup)
-				// WARNING: This noopLock could pile up to size = number of groups
-				gm.noopLock(possiblyPendingGroup)
+	if atomic.CompareAndSwapInt32(&gm.counts[group], -maxCount, 0) {
+		// Locked group
+		ng := gm.strategy()
+		if atomic.CompareAndSwapInt32(&gm.brokerState, group, empty) {
+			if ng > 0 {
+				gm.broker(ng, empty, 1)
 			}
+		} else {
+			panic("should be able to CAS")
 		}
+		return
+	} else {
 
+		if c >= 0 && atomic.AddInt32(&gm.pending, -1) == 0 {
+			release(&gm.brokerWaitSem)
+		}
 	}
 }
 
 // broker is a central authority that allows or denies a group's lock
-func (gm *GM) broker(request int32, existingGroup int32) int32 {
+func (gm *GM) broker(request, existingGroup, count int32) int32 {
 	if atomic.CompareAndSwapInt32(&gm.brokerState, existingGroup, request) {
-		if request == prepareUnlock {
-			// We try to unlock but at the same time, there might be an old request that is yet
-			// to grab the lock (before line #92) so lets wait
-			// Scenario:
-			//    T1                              T2                                          T3
-			//    #1 Lock(1)
-			//    #2 Unlock(1) (c == -maxCount)
-			//                                    #3 Lock(1)
-			//                                    #4 Unlock(1)  (c == -maxCount)
-			//                                                                                #5 Lock(1)
-			//                                                                                #6 broker(1,0)
-			//                                                                                #7    CAS(1,0)
-			//
-			//        #8 CAS(1,-1)
-			//        ! WE ARE HERE: no one has lock now									  #9 grabLock(0)
-			//        leaveLock() should happen after #9
-
-			// So in above case we simulate a lock/unlock.
-			if atomic.AddInt32(&gm.counts[existingGroup], 1) > 0 {
-				acquire(&gm.semaphores[existingGroup])
-			}
-			atomic.AddInt32(&gm.counts[existingGroup], -1)
-			//gm.noopLock(existingGroup)
-			gm.leaveLock(existingGroup)
-
-			// no task is waiting but there could be tasks added before CAS executes, so return allDone
-			// to let the caller check for any pending groups
-			if !atomic.CompareAndSwapInt32(&gm.brokerState, request, empty) {
-				panic("should be able to CAS")
-			}
-			return allDone
-
+		if atomic.LoadInt32(&gm.counts[request]) > 0 {
+			gm.grabLock(request, 0)
+			return -request
 		} else {
-			gm.grabLock(request)
+			atomic.CompareAndSwapInt32(&gm.brokerState, request, empty)
 		}
 	}
 
-	return request
+	return atomic.LoadInt32(&gm.brokerState)
 }
 
 // noopLock creates a no-op Lock() Unlock() on group
@@ -175,8 +135,11 @@ func (gm *GM) leaveLock(group int32) {
 }
 
 // grabLock obtains lock for group and wakes up all sleeping tasks
-func (gm *GM) grabLock(group int32) {
-	waitingTasks := atomic.AddInt32(&gm.counts[group], -maxCount) + maxCount
+func (gm *GM) grabLock(group int32, callingWorker int32) {
+	if atomic.LoadInt32(&gm.counts[group]) <= 0 {
+		panic(fmt.Sprintf("Already unlocked: %v\n", group))
+	}
+	waitingTasks := atomic.AddInt32(&gm.counts[group], -maxCount) + maxCount - callingWorker
 	for i := int32(0); i < waitingTasks; i++ {
 		release(&gm.semaphores[group])
 	}

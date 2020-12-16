@@ -3,8 +3,10 @@ package gmutex
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestGroupMutex_Simple(t *testing.T) {
@@ -150,6 +152,34 @@ func TestThorHammerGroupMutex(t *testing.T) {
 	strategies := []Strategy{ChooseMax, ChooseRandom, ChooseFirst}
 	for _, strategy := range strategies {
 		hammerGroupMutex(t, 10, 100, n, strategy)
+	}
+}
+
+func TestGroupAsRW(t *testing.T) {
+	m := New(2)
+	wg := sync.WaitGroup{}
+	action := int32(0)
+	for i := 0; i < 2000; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			m.Lock(1)
+			defer m.Unlock(1)
+			time.Sleep(300*time.Millisecond)
+			atomic.AddInt32(&action, 1)
+		}()
+
+		go func() {
+			defer wg.Done()
+			m.Lock(2)
+			defer m.Unlock(2)
+			time.Sleep(10*time.Millisecond)
+			atomic.AddInt32(&action, -1)
+		}()
+	}
+	wg.Wait()
+	if action != 0 {
+		t.Fatalf("Expected 0, got %v\n", action)
 	}
 }
 
