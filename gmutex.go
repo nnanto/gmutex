@@ -90,7 +90,7 @@ func (gm *GM) Unlock(group int32) {
 	if atomic.CompareAndSwapInt32(&gm.counts[group], -maxCount, 0) {
 		// Locked group
 		ng := gm.strategy()
-		if atomic.CompareAndSwapInt32(&gm.brokerState, group, empty) {
+		if gm.swapLock(group, empty) {
 			if ng > 0 {
 				gm.broker(ng, empty, 1)
 			}
@@ -108,12 +108,12 @@ func (gm *GM) Unlock(group int32) {
 
 // broker is a central authority that allows or denies a group's lock
 func (gm *GM) broker(request, existingGroup, count int32) int32 {
-	if atomic.CompareAndSwapInt32(&gm.brokerState, existingGroup, request) {
+	if gm.swapLock(existingGroup, request) {
 		if atomic.LoadInt32(&gm.counts[request]) > 0 {
 			gm.grabLock(request, 0)
 			return -request
 		} else {
-			atomic.CompareAndSwapInt32(&gm.brokerState, request, empty)
+			gm.swapLock(request, empty)
 		}
 	}
 
@@ -143,6 +143,10 @@ func (gm *GM) grabLock(group int32, callingWorker int32) {
 	for i := int32(0); i < waitingTasks; i++ {
 		release(&gm.semaphores[group])
 	}
+}
+
+func (gm *GM) swapLock(old , new int32) bool {
+	return atomic.CompareAndSwapInt32(&gm.brokerState, old, new)
 }
 
 // validate group input
