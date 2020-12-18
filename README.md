@@ -33,5 +33,17 @@ func worker2(gm *gmutex.GM) {
 	gm.Unlock(2)
 }
 
-
 ```
+
+# Under the hood
+
+The mechanism is based on the following state transition of broker:
+
+Empty(0) --_Lock(g)_--> Group(g) --_Unlock(g)_--> PrepareUnlock(-1) --> Empty(0) 
+
+1. Initially, brokerState is set to 'Empty(0)'
+1. When Lock(g) is called, the first call to successfully CompareAndSwap changes the brokerState to 'g', while others acquire semaphores & wait
+1. After obtaining lock, all waiting locks on 'g' are released
+1. First Unlock(g) to reach '0' left over tasks will switch the brokerState to 'PrepareUnlock(-1)'. 
+1. In this phase, the broker waits for all pending tasks that 'g' is currently working on and then switches to 'Empty(0)' state again
+1. Once switched back, the unlocking routine will start any 'g' that is waiting for lock
